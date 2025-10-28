@@ -10,16 +10,18 @@ import streamlit as st
 from openpyxl import load_workbook
 
 
-# ==========================================
+# ==========================================================
 # 🔧 CONFIGURATION
-# ==========================================
+# ==========================================================
 st.set_page_config(page_title="🛢️ Primo Drilling Report", layout="wide")
 TEMPLATE_PATH = "Daily Report Template.xlsx"  # must exist in app directory
 
-# ==========================================
+
+# ==========================================================
 # 🔹 Utility Functions
-# ==========================================
+# ==========================================================
 def to_float(x):
+    """Safely convert any string/number to float."""
     if x is None or (isinstance(x, str) and x.strip() == ""):
         return None
     if isinstance(x, (int, float)):
@@ -28,53 +30,60 @@ def to_float(x):
     m = re.findall(r"[-+]?\d*\.\d+|[-+]?\d+", s)
     return float(m[0]) if m else None
 
+
 def to_str(x):
     return "" if x is None else str(x).strip()
 
-def ensure_cols(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
-    for c in cols:
-        if c not in df.columns:
-            df[c] = None
-    return df[cols]
 
-def default_df(columns: list[str], rows: int = 1) -> pd.DataFrame:
+def default_df(columns, rows=1):
+    """Create a DataFrame with given columns and optional empty rows."""
     return pd.DataFrame([{c: None for c in columns} for _ in range(rows)])
 
-def normalize_numeric(df: pd.DataFrame):
+
+def normalize_numeric(df):
+    """Convert numeric-looking columns to floats and others to strings."""
     for col in df.columns:
-        if any(k in col.lower() for k in ["ft","hrs","rpm","psi","qty","no","weight","od","id","gpm","spm","size","length","depth","bbl","cum","g_16"]):
+        if any(
+            k in col.lower()
+            for k in [
+                "ft", "hrs", "rpm", "psi", "qty", "no", "weight", "od", "id",
+                "gpm", "spm", "size", "length", "depth", "bbl", "cum", "g_16"
+            ]
+        ):
             df[col] = df[col].map(to_float)
         else:
             df[col] = df[col].map(to_str)
     return df
 
-def add_meta(df: pd.DataFrame, core: dict) -> pd.DataFrame:
+
+def add_meta(df, core):
+    """Attach the core metadata fields to each table."""
     meta = pd.DataFrame([core] * max(len(df.index), 1))
     return pd.concat([meta.reset_index(drop=True), df.reset_index(drop=True)], axis=1)
 
 
-# ==========================================
+# ==========================================================
 # ⚙️ Streamlit UI
-# ==========================================
+# ==========================================================
 st.title("🛢️ Primo Daily Drilling Report — Data Entry & Export")
 
 # ---------------- Header Section ----------------
 st.subheader("Header Information")
 c1, c2, c3, c4 = st.columns(4)
 report_number = c1.text_input("Report #", value="1")
-report_date   = c2.date_input("Date", value=datetime.today().date())
-oil_company   = c3.text_input("Oil Company", value="KIMMERIDGE TEXAS GAS")
-contractor    = c4.text_input("Contractor", value="Primo")
+report_date = c2.date_input("Date", value=datetime.today().date())
+oil_company = c3.text_input("Oil Company", value="KIMMERIDGE TEXAS GAS")
+contractor = c4.text_input("Contractor", value="Primo")
 
 c5, c6, c7, c8 = st.columns(4)
-well_name     = c5.text_input("Well Name & No", value="HUFF A 106H")
-location      = c6.text_input("Location", value="MCMULLEN")
-county_state  = c7.text_input("County, State", value="TEXAS")
-permit_no     = c8.text_input("Permit Number", value="909899")
+well_name = c5.text_input("Well Name & No", value="HUFF A 106H")
+location = c6.text_input("Location", value="MCMULLEN")
+county_state = c7.text_input("County, State", value="TEXAS")
+permit_no = c8.text_input("Permit Number", value="909899")
 
 c9, c10 = st.columns(2)
-api_number    = c9.text_input("API #", value="42-311-37631")
-rig_con_no    = c10.text_input("Rig Contractor & No.", value="7")
+api_number = c9.text_input("API #", value="42-311-37631")
+rig_con_no = c10.text_input("Rig Contractor & No.", value="7")
 
 # ---------------- Daily Progress ----------------
 st.markdown("---")
@@ -83,96 +92,116 @@ c1, c2, c3, c4 = st.columns(4)
 depth_0000 = c1.number_input("00:00 Depth (ft)", value=120.0)
 depth_2400 = c2.number_input("24:00 Depth (ft)", value=288.0)
 footage_today = c3.number_input("Footage Today (ft)", value=168.0)
-rop_today     = c4.number_input("ROP Today (ft/hr)", value=56.0)
+rop_today = c4.number_input("ROP Today (ft/hr)", value=56.0)
 
 c5, c6, c7, _ = st.columns(4)
 drlg_hrs_today = c5.number_input("Drlg Hrs Today", value=3.0)
-current_run_ftg= c6.number_input("Current Run Ftg", value=0.0)
+current_run_ftg = c6.number_input("Current Run Ftg", value=0.0)
 circ_hrs_today = c7.number_input("Circ Hrs Today", value=0.0)
 
-# ---------------- Tables ----------------
+# ---------------- Data Tables ----------------
 st.markdown("---")
 colA, colB = st.columns(2)
 
 with colA:
     st.subheader("Pump Data")
     pump_df = st.data_editor(
-        default_df(["pump_no","bbls_per_stroke","gals_per_stroke","vol_gpm","spm"], rows=2).assign(pump_no=[1,2]),
-        num_rows="dynamic", key="pump",
+        default_df(
+            ["pump_no", "bbls_per_stroke", "gals_per_stroke", "vol_gpm", "spm"], rows=2
+        ).assign(pump_no=[1, 2]),
+        num_rows="dynamic",
+        key="pump",
     )
 
     st.subheader("Mud Data")
-    mud_df = st.data_editor(default_df(["weight_ppg","viscosity_sec","pressure_psi"]), key="mud")
+    mud_df = st.data_editor(default_df(["weight_ppg", "viscosity_sec", "pressure_psi"]), key="mud")
 
     st.subheader("Drilling Parameters & Motor")
-    param_cols = [
-        "st_wt_rot_klbs","pu_wt_klbs","so_wt_klbs","wob_klbs","rotary_rpm","motor_rpm","total_bit_rpm",
-        "rot_tq_off_btm_ftlb","rot_tq_on_btm_ftlb","off_bottom_pressure_psi","on_bottom_pressure_psi"
-    ]
-    params_df = st.data_editor(default_df(param_cols), key="params")
+    params_df = st.data_editor(
+        default_df([
+            "st_wt_rot_klbs", "pu_wt_klbs", "so_wt_klbs", "wob_klbs",
+            "rotary_rpm", "motor_rpm", "total_bit_rpm", "rot_tq_off_btm_ftlb",
+            "rot_tq_on_btm_ftlb", "off_bottom_pressure_psi", "on_bottom_pressure_psi"
+        ]),
+        key="params",
+    )
 
-    motor_cols = [
-        "run_no","size_in","type","serial_no","tool_deflection","avg_diff_press_psi","daily_drill_hrs",
-        "daily_circ_hrs","daily_total_hrs","acc_drill_hrs","acc_circ_hrs","depth_in_ft","depth_out_ft"
-    ]
-    motor_df = st.data_editor(default_df(motor_cols), key="motor")
+    motor_df = st.data_editor(
+        default_df([
+            "run_no", "size_in", "type", "serial_no", "tool_deflection", "avg_diff_press_psi",
+            "daily_drill_hrs", "daily_circ_hrs", "daily_total_hrs", "acc_drill_hrs", "acc_circ_hrs",
+            "depth_in_ft", "depth_out_ft"
+        ]),
+        key="motor",
+    )
 
 with colB:
     st.subheader("BHA")
     bha_df = st.data_editor(
-        default_df(["item","od_in","id_in","weight","connection","length_ft","depth_ft"], rows=8).assign(
-            item=["BIT","MOTOR","UBHO","MONEL","SHOCK SUB","8\" DC","XO","6\" DC"]
-        ),
+        default_df(
+            ["item", "od_in", "id_in", "weight", "connection", "length_ft", "depth_ft"], rows=8
+        ).assign(item=["BIT", "MOTOR", "UBHO", "MONEL", "SHOCK SUB", "8\" DC", "XO", "6\" DC"]),
         key="bha",
     )
 
     st.subheader("Survey Info (optional)")
-    survey_df = st.data_editor(default_df(["depth_ft","inc_deg","azi_deg"], rows=3), key="survey")
+    survey_df = st.data_editor(default_df(["depth_ft", "inc_deg", "azi_deg"], rows=3), key="survey")
 
-# ---------------- Bit & Others ----------------
+# ---------------- Bit, Casing, and Others ----------------
 st.markdown("---")
 st.subheader("Bit Data")
-bit_cols = [
-    "no","size_in","mfg","type","nozzles_or_tfa","serial_no","depth_in_ft","cum_footage_ft","cum_hours",
-    "depth_out_ft","dull_ir","dull_or","dull_dc","loc","bs","g_16","oc","rpld"
-]
-bit_df = st.data_editor(default_df(bit_cols, rows=2), key="bit")
+bit_df = st.data_editor(
+    default_df([
+        "no", "size_in", "mfg", "type", "nozzles_or_tfa", "serial_no", "depth_in_ft", "cum_footage_ft",
+        "cum_hours", "depth_out_ft", "dull_ir", "dull_or", "dull_dc", "loc", "bs", "g_16", "oc", "rpld"
+    ], rows=2),
+    key="bit",
+)
 
 colC, colD, colE = st.columns(3)
 with colC:
     st.subheader("Casing")
-    casing_df = st.data_editor(default_df(["od_in","id_in","weight","grade","connection","depth_set_ft"], rows=3), key="casing")
-
+    casing_df = st.data_editor(
+        default_df(["od_in", "id_in", "weight", "grade", "connection", "depth_set_ft"], rows=3), key="casing"
+    )
 with colD:
     st.subheader("Drill Pipe")
-    drillpipe_df = st.data_editor(default_df(["od_in","id_in","weight","grade","connection"], rows=3), key="drillpipe")
-
+    drillpipe_df = st.data_editor(
+        default_df(["od_in", "id_in", "weight", "grade", "connection"], rows=3), key="drillpipe"
+    )
 with colE:
     st.subheader("Rental Equipment")
-    rental_df = st.data_editor(default_df(["item","serial_no","date_received","date_returned"], rows=2), key="rental")
+    rental_df = st.data_editor(
+        default_df(["item", "serial_no", "date_received", "date_returned"], rows=2), key="rental"
+    )
 
 st.subheader("Time Breakdown & Forecast")
-time_df = st.data_editor(default_df(
-    ["from_time","to_time","hrs","start_depth_ft","end_depth_ft","cl","description","code","forecast"], rows=6
-), key="timebk")
+time_df = st.data_editor(
+    default_df(
+        ["from_time", "to_time", "hrs", "start_depth_ft", "end_depth_ft", "cl", "description", "code", "forecast"],
+        rows=6,
+    ),
+    key="timebk",
+)
 
 st.subheader("Fuel, Chemicals, Crew")
 colF, colG = st.columns(2)
 with colF:
-    fuel_df = st.data_editor(default_df(
-        ["fuel_type","vendor","begin_qty","received","total","used","remaining"], rows=1
-    ).assign(fuel_type="DIESEL"), key="fuel")
-    chemicals_df = st.data_editor(default_df(["additive","qty","unit"], rows=5), key="chems")
+    fuel_df = st.data_editor(
+        default_df(["fuel_type", "vendor", "begin_qty", "received", "total", "used", "remaining"], rows=1)
+        .assign(fuel_type="DIESEL"),
+        key="fuel",
+    )
+    chemicals_df = st.data_editor(default_df(["additive", "qty", "unit"], rows=5), key="chems")
 
 with colG:
-    personnel_df = st.data_editor(default_df(["tour","role","name","hours"], rows=8), key="people")
+    personnel_df = st.data_editor(default_df(["tour", "role", "name", "hours"], rows=8), key="people")
 
 
-# ==========================================
+# ==========================================================
 # 🚀 Export & Download
-# ==========================================
-if st.button("📦 Normalize & Export"):
-    # Core metadata
+# ==========================================================
+if st.button("📦 Normalize, Dedupe & Export"):
     core = dict(
         report_number=to_str(report_number),
         date=str(report_date),
@@ -194,13 +223,13 @@ if st.button("📦 Normalize & Export"):
         created_at=str(datetime.utcnow()),
     )
 
-    # Normalize numeric/text columns
-    dfs = [pump_df, mud_df, params_df, motor_df, bha_df, survey_df, bit_df,
-           casing_df, drillpipe_df, rental_df, time_df, fuel_df, chemicals_df, personnel_df]
+    dfs = [
+        pump_df, mud_df, params_df, motor_df, bha_df, survey_df, bit_df,
+        casing_df, drillpipe_df, rental_df, time_df, fuel_df, chemicals_df, personnel_df
+    ]
     for df in dfs:
         normalize_numeric(df)
 
-    # Build export tables
     outputs = {
         "core": pd.DataFrame([core]),
         "pump": add_meta(pump_df, core),
@@ -219,15 +248,26 @@ if st.button("📦 Normalize & Export"):
         "personnel": add_meta(personnel_df, core),
     }
 
+    # ✅ Deduplicate each table before exporting
+    dedupe_report = []
+    for name, df in outputs.items():
+        before = len(df)
+        df = df.drop_duplicates(ignore_index=True)
+        after = len(df)
+        outputs[name] = df
+        removed = before - after
+        if removed > 0:
+            dedupe_report.append(f"{name}.csv → removed {removed} duplicate rows")
+
     # --- Fill Excel Template ---
     try:
         wb = load_workbook(TEMPLATE_PATH, keep_vba=True)
         ws = wb.active
-        ws["B2"]  = core["report_number"]
-        ws["E2"]  = core["date"]
-        ws["B4"]  = core["well_name"]
-        ws["B5"]  = core["location"]
-        ws["B8"]  = core["contractor"]
+        ws["B2"] = core["report_number"]
+        ws["E2"] = core["date"]
+        ws["B4"] = core["well_name"]
+        ws["B5"] = core["location"]
+        ws["B8"] = core["contractor"]
         ws["C12"] = core["depth_0000_ft"]
         ws["C13"] = core["depth_2400_ft"]
         ws["E12"] = core["footage_today_ft"]
@@ -243,10 +283,10 @@ if st.button("📦 Normalize & Export"):
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
     except Exception as e:
-        st.warning(f"⚠️ Could not fill template: {e}")
+        st.warning(f"⚠️ Could not fill Excel template: {e}")
         filled_xlsx = None
 
-    # --- Build ZIP with all CSVs ---
+    # --- Build ZIP with deduped CSVs ---
     zip_buf = io.BytesIO()
     with zipfile.ZipFile(zip_buf, "w") as zf:
         for name, df in outputs.items():
@@ -262,4 +302,6 @@ if st.button("📦 Normalize & Export"):
         mime="application/zip",
     )
 
-    st.success("✅ Export complete! You can now upload the CSVs to Supabase manually.")
+    if dedupe_report:
+        st.info("🧹 Duplicates Removed:\n" + "\n".join(dedupe_report))
+    st.success("✅ Export complete! Files are ready for Supabase upload.")
