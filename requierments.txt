@@ -1,3 +1,7 @@
 streamlit
 pandas
 openpyxl
+supabase-py
+python-dotenv
+smtplib
+email-validator
