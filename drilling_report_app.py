@@ -12,7 +12,7 @@ from openpyxl import load_workbook
 # 🔧 CONFIGURATION
 # ==============================
 SUPABASE_URL = st.secrets["supabase_url"]
-SUPABASE_KEY = st.secrets["supabase_service_key"]
+SUPABASE_KEY = st.secrets["supabase_key"]
 SMTP_SERVER = st.secrets["smtp_server"]
 SMTP_PORT = int(st.secrets["smtp_port"])
 SMTP_USER = st.secrets["smtp_user"]
