@@ -1,7 +1,5 @@
-streamlit
-pandas
-openpyxl
-supabase-py
-python-dotenv
-smtplib
-email-validator
+streamlit==1.50.0
+pandas==2.3.3
+openpyxl==3.1.5
+supabase==2.3.5
+python-dotenv==1.0.1
