@@ -1,33 +1,39 @@
-import streamlit as st
-import pandas as pd
-import re, io, json, smtplib, asyncio
+# drilling_report_app.py
+import io
+import json
+import re
+import smtplib
 from datetime import datetime
-from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
+from email.mime.multipart import MIMEMultipart
 from email import encoders
+
+import pandas as pd
+import streamlit as st
 from openpyxl import load_workbook
-from supabase import AsyncClient
+from supabase import create_client, Client
+
 
 # ==========================================
 # 🔧 CONFIGURATION
 # ==========================================
-SUPABASE_URL = st.secrets["supabase_url"]
-SUPABASE_KEY = st.secrets["supabase_service_key"]
-SMTP_SERVER = st.secrets["smtp_server"]
-SMTP_PORT = int(st.secrets["smtp_port"])
-SMTP_USER = st.secrets["smtp_user"]
-SMTP_PASS = st.secrets["smtp_pass"]
-TEMPLATE_PATH = "Daily Report Template.xlsx"
+st.set_page_config(page_title="🛢️ Primo Drilling Report", layout="wide")
 
+# Required secrets (Streamlit Cloud: Settings → Secrets)
+SUPABASE_URL  = st.secrets["supabase_url"]
+SUPABASE_KEY  = st.secrets["supabase_service_key"]  # use service role on server-side only
+SMTP_SERVER   = st.secrets["smtp_server"]
+SMTP_PORT     = int(st.secrets["smtp_port"])
+SMTP_USER     = st.secrets["smtp_user"]
+SMTP_PASS     = st.secrets["smtp_pass"]
+TEMPLATE_PATH = "Daily Report Template.xlsx"  # make sure this exists in your repo root
 
-# Initialize Supabase client asynchronously (cached)
-async def _init_client():
-    return await AsyncClient.create(SUPABASE_URL, SUPABASE_KEY)
+# Cache the client so re-runs don’t recreate it
+@st.cache_resource(show_spinner=False)
+def get_supabase_client() -> Client:
+    return create_client(SUPABASE_URL, SUPABASE_KEY)
 
-if "supabase" not in st.session_state:
-    st.session_state.supabase = asyncio.run(_init_client())
-
-supabase = st.session_state.supabase
+supabase = get_supabase_client()
 
 
 # ==========================================
@@ -62,11 +68,23 @@ def normalize_numeric(df: pd.DataFrame):
             df[col] = df[col].map(to_str)
     return df
 
+def add_meta(df: pd.DataFrame, core: dict) -> pd.DataFrame:
+    meta = pd.DataFrame([core] * max(len(df.index), 1))
+    return pd.concat([meta.reset_index(drop=True), df.reset_index(drop=True)], axis=1)
+
+def insert_df(table: str, df: pd.DataFrame, chunk_size: int = 500):
+    """Insert a DataFrame into Supabase in chunks to avoid payload limits."""
+    if df.empty:
+        return
+    records = json.loads(df.to_json(orient="records"))
+    for i in range(0, len(records), chunk_size):
+        chunk = records[i : i + chunk_size]
+        supabase.table(table).insert(chunk).execute()
+
 
 # ==========================================
 # ⚙️ Streamlit UI
 # ==========================================
-st.set_page_config(page_title="🛢️ Primo Drilling Report", layout="wide")
 st.title("🛢️ Primo Daily Drilling Report — Full Entry & Automation")
 
 email = st.text_input("📧 Enter your email to receive the formatted report:")
@@ -99,7 +117,7 @@ depth_2400 = c2.number_input("24:00 Depth (ft)", value=288.0)
 footage_today = c3.number_input("Footage Today (ft)", value=168.0)
 rop_today     = c4.number_input("ROP Today (ft/hr)", value=56.0)
 
-c5, c6, c7, c8 = st.columns(4)
+c5, c6, c7, _ = st.columns(4)
 drlg_hrs_today = c5.number_input("Drlg Hrs Today", value=3.0)
 current_run_ftg= c6.number_input("Current Run Ftg", value=0.0)
 circ_hrs_today = c7.number_input("Circ Hrs Today", value=0.0)
@@ -110,21 +128,36 @@ colA, colB = st.columns(2)
 
 with colA:
     st.subheader("Pump Data")
-    pump_df = st.data_editor(default_df(["pump_no","bbls_per_stroke","gals_per_stroke","vol_gpm","spm"], rows=2).assign(pump_no=[1,2]), num_rows="dynamic", key="pump")
+    pump_df = st.data_editor(
+        default_df(["pump_no","bbls_per_stroke","gals_per_stroke","vol_gpm","spm"], rows=2).assign(pump_no=[1,2]),
+        num_rows="dynamic",
+        key="pump",
+    )
 
     st.subheader("Mud Data")
     mud_df = st.data_editor(default_df(["weight_ppg","viscosity_sec","pressure_psi"]), key="mud")
 
     st.subheader("Drilling Parameters & Motor")
-    param_cols = ["st_wt_rot_klbs","pu_wt_klbs","so_wt_klbs","wob_klbs","rotary_rpm","motor_rpm","total_bit_rpm","rot_tq_off_btm_ftlb","rot_tq_on_btm_ftlb","off_bottom_pressure_psi","on_bottom_pressure_psi"]
+    param_cols = [
+        "st_wt_rot_klbs","pu_wt_klbs","so_wt_klbs","wob_klbs","rotary_rpm","motor_rpm","total_bit_rpm",
+        "rot_tq_off_btm_ftlb","rot_tq_on_btm_ftlb","off_bottom_pressure_psi","on_bottom_pressure_psi"
+    ]
     params_df = st.data_editor(default_df(param_cols), key="params")
 
-    motor_cols = ["run_no","size_in","type","serial_no","tool_deflection","avg_diff_press_psi","daily_drill_hrs","daily_circ_hrs","daily_total_hrs","acc_drill_hrs","acc_circ_hrs","depth_in_ft","depth_out_ft"]
+    motor_cols = [
+        "run_no","size_in","type","serial_no","tool_deflection","avg_diff_press_psi","daily_drill_hrs",
+        "daily_circ_hrs","daily_total_hrs","acc_drill_hrs","acc_circ_hrs","depth_in_ft","depth_out_ft"
+    ]
     motor_df = st.data_editor(default_df(motor_cols), key="motor")
 
 with colB:
     st.subheader("BHA")
-    bha_df = st.data_editor(default_df(["item","od_in","id_in","weight","connection","length_ft","depth_ft"], rows=8).assign(item=["BIT","MOTOR","UBHO","MONEL","SHOCK SUB","8\" DC","XO","6\" DC"]), key="bha")
+    bha_df = st.data_editor(
+        default_df(["item","od_in","id_in","weight","connection","length_ft","depth_ft"], rows=8).assign(
+            item=["BIT","MOTOR","UBHO","MONEL","SHOCK SUB","8\" DC","XO","6\" DC"]
+        ),
+        key="bha",
+    )
 
     st.subheader("Survey Info (optional)")
     survey_df = st.data_editor(default_df(["depth_ft","inc_deg","azi_deg"], rows=3), key="survey")
@@ -132,7 +165,10 @@ with colB:
 # ---------------- Bit & Others ----------------
 st.markdown("---")
 st.subheader("Bit Data")
-bit_cols = ["no","size_in","mfg","type","nozzles_or_tfa","serial_no","depth_in_ft","cum_footage_ft","cum_hours","depth_out_ft","dull_ir","dull_or","dull_dc","loc","bs","g_16","oc","rpld"]
+bit_cols = [
+    "no","size_in","mfg","type","nozzles_or_tfa","serial_no","depth_in_ft","cum_footage_ft","cum_hours",
+    "depth_out_ft","dull_ir","dull_or","dull_dc","loc","bs","g_16","oc","rpld"
+]
 bit_df = st.data_editor(default_df(bit_cols, rows=2), key="bit")
 
 colC, colD, colE = st.columns(3)
@@ -149,12 +185,16 @@ with colE:
     rental_df = st.data_editor(default_df(["item","serial_no","date_received","date_returned"], rows=2), key="rental")
 
 st.subheader("Time Breakdown & Forecast")
-time_df = st.data_editor(default_df(["from_time","to_time","hrs","start_depth_ft","end_depth_ft","cl","description","code","forecast"], rows=6), key="timebk")
+time_df = st.data_editor(default_df(
+    ["from_time","to_time","hrs","start_depth_ft","end_depth_ft","cl","description","code","forecast"], rows=6
+), key="timebk")
 
 st.subheader("Fuel, Chemicals, Crew")
 colF, colG = st.columns(2)
 with colF:
-    fuel_df = st.data_editor(default_df(["fuel_type","vendor","begin_qty","received","total","used","remaining"], rows=1).assign(fuel_type="DIESEL"), key="fuel")
+    fuel_df = st.data_editor(default_df(
+        ["fuel_type","vendor","begin_qty","received","total","used","remaining"], rows=1
+    ).assign(fuel_type="DIESEL"), key="fuel")
     chemicals_df = st.data_editor(default_df(["additive","qty","unit"], rows=5), key="chems")
 
 with colG:
@@ -164,16 +204,8 @@ with colG:
 # ==========================================
 # 🚀 Submit & Send
 # ==========================================
-async def upload_to_supabase(client: AsyncClient, outputs: dict[str, pd.DataFrame]):
-    for name, df in outputs.items():
-        try:
-            data = json.loads(df.to_json(orient="records"))
-            await client.table(f"drilling_{name}").insert(data).execute()
-        except Exception as e:
-            st.warning(f"⚠️ Skipped {name}: {e}")
-
-
 if st.button("📤 Submit & Send Report"):
+    # Core metadata for every record
     core = dict(
         report_number=to_str(report_number),
         date=str(report_date),
@@ -192,56 +224,72 @@ if st.button("📤 Submit & Send Report"):
         drlg_hrs_today=to_float(drlg_hrs_today),
         current_run_ftg=to_float(current_run_ftg),
         circ_hrs_today=to_float(circ_hrs_today),
-        created_at=str(datetime.utcnow())
+        created_at=str(datetime.utcnow()),
     )
 
-    def add_meta(df):
-        meta = pd.DataFrame([core] * len(df.index))
-        return pd.concat([meta.reset_index(drop=True), df.reset_index(drop=True)], axis=1)
-
-    for df in [pump_df, mud_df, params_df, motor_df, bha_df, survey_df, bit_df, casing_df, drillpipe_df, rental_df, time_df, fuel_df, chemicals_df, personnel_df]:
+    # Normalize numeric/text columns
+    for df in [
+        pump_df, mud_df, params_df, motor_df, bha_df, survey_df, bit_df,
+        casing_df, drillpipe_df, rental_df, time_df, fuel_df, chemicals_df, personnel_df
+    ]:
         df[:] = normalize_numeric(df)
 
+    # Build outputs dict with meta added
     outputs = {
         "core": pd.DataFrame([core]),
-        "pump": add_meta(pump_df),
-        "mud": add_meta(mud_df),
-        "params": add_meta(params_df),
-        "motor": add_meta(motor_df),
-        "bha": add_meta(bha_df),
-        "survey": add_meta(survey_df),
-        "bit": add_meta(bit_df),
-        "casing": add_meta(casing_df),
-        "drillpipe": add_meta(drillpipe_df),
-        "rental_equipment": add_meta(rental_df),
-        "time_breakdown": add_meta(time_df),
-        "fuel": add_meta(fuel_df),
-        "chemicals": add_meta(chemicals_df),
-        "personnel": add_meta(personnel_df)
+        "pump": add_meta(pump_df, core),
+        "mud": add_meta(mud_df, core),
+        "params": add_meta(params_df, core),
+        "motor": add_meta(motor_df, core),
+        "bha": add_meta(bha_df, core),
+        "survey": add_meta(survey_df, core),
+        "bit": add_meta(bit_df, core),
+        "casing": add_meta(casing_df, core),
+        "drillpipe": add_meta(drillpipe_df, core),
+        "rental_equipment": add_meta(rental_df, core),
+        "time_breakdown": add_meta(time_df, core),
+        "fuel": add_meta(fuel_df, core),
+        "chemicals": add_meta(chemicals_df, core),
+        "personnel": add_meta(personnel_df, core),
     }
 
-    asyncio.run(upload_to_supabase(supabase, outputs))
-    st.success("✅ All data uploaded to Supabase!")
+    # Upload everything to Supabase (chunked)
+    errors = []
+    for name, df in outputs.items():
+        try:
+            insert_df(f"drilling_{name}", df, chunk_size=500)
+        except Exception as e:
+            errors.append((name, str(e)))
+            st.warning(f"⚠️ Skipped {name}: {e}")
 
-    # --- Fill Excel Template ---
-    wb = load_workbook(TEMPLATE_PATH, keep_vba=True)
-    ws = wb.active
-    ws["B2"] = core["report_number"]
-    ws["E2"] = core["date"]
-    ws["B4"] = core["well_name"]
-    ws["B5"] = core["location"]
-    ws["B8"] = core["contractor"]
-    ws["C12"] = core["depth_0000_ft"]
-    ws["C13"] = core["depth_2400_ft"]
-    ws["E12"] = core["footage_today_ft"]
-    ws["E13"] = core["drlg_hrs_today"]
+    if not errors:
+        st.success("✅ All data uploaded to Supabase!")
+    else:
+        st.info("Some tables were skipped. See warnings above.")
 
-    out_xlsx = io.BytesIO()
-    wb.save(out_xlsx)
-    out_xlsx.seek(0)
+    # --- Fill Excel Template (basic mapping)
+    try:
+        wb = load_workbook(TEMPLATE_PATH, keep_vba=True)
+        ws = wb.active
+        ws["B2"]  = core["report_number"]
+        ws["E2"]  = core["date"]
+        ws["B4"]  = core["well_name"]
+        ws["B5"]  = core["location"]
+        ws["B8"]  = core["contractor"]
+        ws["C12"] = core["depth_0000_ft"]
+        ws["C13"] = core["depth_2400_ft"]
+        ws["E12"] = core["footage_today_ft"]
+        ws["E13"] = core["drlg_hrs_today"]
 
-    # --- Email report ---
-    if email:
+        out_xlsx = io.BytesIO()
+        wb.save(out_xlsx)
+        out_xlsx.seek(0)
+    except Exception as e:
+        st.error(f"Excel template error: {e}")
+        out_xlsx = None
+
+    # --- Email the formatted report ---
+    if out_xlsx and email:
         try:
             msg = MIMEMultipart()
             msg["From"] = SMTP_USER
@@ -261,4 +309,11 @@ if st.button("📤 Submit & Send Report"):
         except Exception as e:
             st.error(f"Email send failed: {e}")
 
-    st.download_button("⬇️ Download Filled Excel", data=out_xlsx.getvalue(), file_name=f"Drilling_Report_{report_number}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    # --- Download button
+    if out_xlsx:
+        st.download_button(
+            "⬇️ Download Filled Excel",
+            data=out_xlsx.getvalue(),
+            file_name=f"Drilling_Report_{report_number}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
