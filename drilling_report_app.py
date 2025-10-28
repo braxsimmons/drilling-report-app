@@ -2,39 +2,19 @@
 import io
 import json
 import re
-import smtplib
+import zipfile
 from datetime import datetime
-from email.mime.base import MIMEBase
-from email.mime.multipart import MIMEMultipart
-from email import encoders
 
 import pandas as pd
 import streamlit as st
 from openpyxl import load_workbook
-from supabase import create_client, Client
 
 
 # ==========================================
 # 🔧 CONFIGURATION
 # ==========================================
 st.set_page_config(page_title="🛢️ Primo Drilling Report", layout="wide")
-
-# Required secrets (Streamlit Cloud: Settings → Secrets)
-SUPABASE_URL  = st.secrets["supabase_url"]
-SUPABASE_KEY  = st.secrets["supabase_service_key"]  # use service role on server-side only
-SMTP_SERVER   = st.secrets["smtp_server"]
-SMTP_PORT     = int(st.secrets["smtp_port"])
-SMTP_USER     = st.secrets["smtp_user"]
-SMTP_PASS     = st.secrets["smtp_pass"]
-TEMPLATE_PATH = "Daily Report Template.xlsx"  # make sure this exists in your repo root
-
-# Cache the client so re-runs don’t recreate it
-@st.cache_resource(show_spinner=False)
-def get_supabase_client() -> Client:
-    return create_client(SUPABASE_URL, SUPABASE_KEY)
-
-supabase = get_supabase_client()
-
+TEMPLATE_PATH = "Daily Report Template.xlsx"  # must exist in app directory
 
 # ==========================================
 # 🔹 Utility Functions
@@ -72,23 +52,11 @@ def add_meta(df: pd.DataFrame, core: dict) -> pd.DataFrame:
     meta = pd.DataFrame([core] * max(len(df.index), 1))
     return pd.concat([meta.reset_index(drop=True), df.reset_index(drop=True)], axis=1)
 
-def insert_df(table: str, df: pd.DataFrame, chunk_size: int = 500):
-    """Insert a DataFrame into Supabase in chunks to avoid payload limits."""
-    if df.empty:
-        return
-    records = json.loads(df.to_json(orient="records"))
-    for i in range(0, len(records), chunk_size):
-        chunk = records[i : i + chunk_size]
-        supabase.table(table).insert(chunk).execute()
-
 
 # ==========================================
 # ⚙️ Streamlit UI
 # ==========================================
-st.title("🛢️ Primo Daily Drilling Report — Full Entry & Automation")
-
-email = st.text_input("📧 Enter your email to receive the formatted report:")
-st.markdown("---")
+st.title("🛢️ Primo Daily Drilling Report — Data Entry & Export")
 
 # ---------------- Header Section ----------------
 st.subheader("Header Information")
@@ -130,8 +98,7 @@ with colA:
     st.subheader("Pump Data")
     pump_df = st.data_editor(
         default_df(["pump_no","bbls_per_stroke","gals_per_stroke","vol_gpm","spm"], rows=2).assign(pump_no=[1,2]),
-        num_rows="dynamic",
-        key="pump",
+        num_rows="dynamic", key="pump",
     )
 
     st.subheader("Mud Data")
@@ -202,10 +169,10 @@ with colG:
 
 
 # ==========================================
-# 🚀 Submit & Send
+# 🚀 Export & Download
 # ==========================================
-if st.button("📤 Submit & Send Report"):
-    # Core metadata for every record
+if st.button("📦 Normalize & Export"):
+    # Core metadata
     core = dict(
         report_number=to_str(report_number),
         date=str(report_date),
@@ -228,13 +195,12 @@ if st.button("📤 Submit & Send Report"):
     )
 
     # Normalize numeric/text columns
-    for df in [
-        pump_df, mud_df, params_df, motor_df, bha_df, survey_df, bit_df,
-        casing_df, drillpipe_df, rental_df, time_df, fuel_df, chemicals_df, personnel_df
-    ]:
-        df[:] = normalize_numeric(df)
+    dfs = [pump_df, mud_df, params_df, motor_df, bha_df, survey_df, bit_df,
+           casing_df, drillpipe_df, rental_df, time_df, fuel_df, chemicals_df, personnel_df]
+    for df in dfs:
+        normalize_numeric(df)
 
-    # Build outputs dict with meta added
+    # Build export tables
     outputs = {
         "core": pd.DataFrame([core]),
         "pump": add_meta(pump_df, core),
@@ -253,21 +219,7 @@ if st.button("📤 Submit & Send Report"):
         "personnel": add_meta(personnel_df, core),
     }
 
-    # Upload everything to Supabase (chunked)
-    errors = []
-    for name, df in outputs.items():
-        try:
-            insert_df(f"drilling_{name}", df, chunk_size=500)
-        except Exception as e:
-            errors.append((name, str(e)))
-            st.warning(f"⚠️ Skipped {name}: {e}")
-
-    if not errors:
-        st.success("✅ All data uploaded to Supabase!")
-    else:
-        st.info("Some tables were skipped. See warnings above.")
-
-    # --- Fill Excel Template (basic mapping)
+    # --- Fill Excel Template ---
     try:
         wb = load_workbook(TEMPLATE_PATH, keep_vba=True)
         ws = wb.active
@@ -281,39 +233,33 @@ if st.button("📤 Submit & Send Report"):
         ws["E12"] = core["footage_today_ft"]
         ws["E13"] = core["drlg_hrs_today"]
 
-        out_xlsx = io.BytesIO()
-        wb.save(out_xlsx)
-        out_xlsx.seek(0)
-    except Exception as e:
-        st.error(f"Excel template error: {e}")
-        out_xlsx = None
-
-    # --- Email the formatted report ---
-    if out_xlsx and email:
-        try:
-            msg = MIMEMultipart()
-            msg["From"] = SMTP_USER
-            msg["To"] = email
-            msg["Subject"] = f"Daily Drilling Report #{report_number}"
-            part = MIMEBase("application", "vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-            part.set_payload(out_xlsx.getvalue())
-            encoders.encode_base64(part)
-            part.add_header("Content-Disposition", f"attachment; filename=Drilling_Report_{report_number}.xlsx")
-            msg.attach(part)
-
-            with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
-                server.starttls()
-                server.login(SMTP_USER, SMTP_PASS)
-                server.send_message(msg)
-            st.success(f"📧 Report emailed to {email}")
-        except Exception as e:
-            st.error(f"Email send failed: {e}")
-
-    # --- Download button
-    if out_xlsx:
+        filled_xlsx = io.BytesIO()
+        wb.save(filled_xlsx)
+        filled_xlsx.seek(0)
         st.download_button(
-            "⬇️ Download Filled Excel",
-            data=out_xlsx.getvalue(),
+            "⬇️ Download Filled Excel Template",
+            data=filled_xlsx.getvalue(),
             file_name=f"Drilling_Report_{report_number}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
+    except Exception as e:
+        st.warning(f"⚠️ Could not fill template: {e}")
+        filled_xlsx = None
+
+    # --- Build ZIP with all CSVs ---
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w") as zf:
+        for name, df in outputs.items():
+            zf.writestr(f"{name}.csv", df.to_csv(index=False))
+        if filled_xlsx:
+            zf.writestr("filled_template.xlsx", filled_xlsx.getvalue())
+    zip_buf.seek(0)
+
+    st.download_button(
+        "⬇️ Download All CSVs + Template (ZIP)",
+        data=zip_buf.getvalue(),
+        file_name=f"drilling_report_export_{report_date}.zip",
+        mime="application/zip",
+    )
+
+    st.success("✅ Export complete! You can now upload the CSVs to Supabase manually.")
