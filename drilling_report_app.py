@@ -1,6 +1,4 @@
-# drilling_report_app.py
 import io
-import json
 import re
 import zipfile
 from datetime import datetime
@@ -14,14 +12,14 @@ from openpyxl import load_workbook
 # 🔧 CONFIGURATION
 # ==========================================================
 st.set_page_config(page_title="🛢️ Primo Drilling Report", layout="wide")
-TEMPLATE_PATH = "Daily Report Template.xlsx"  # must exist in app directory
+TEMPLATE_PATH = "Daily Report Template.xlsx"  # Must exist in app directory
 
 
 # ==========================================================
 # 🔹 Utility Functions
 # ==========================================================
 def to_float(x):
-    """Safely convert any string/number to float."""
+    """Convert text or numbers safely to float."""
     if x is None or (isinstance(x, str) and x.strip() == ""):
         return None
     if isinstance(x, (int, float)):
@@ -32,16 +30,17 @@ def to_float(x):
 
 
 def to_str(x):
+    """Convert any value to trimmed string."""
     return "" if x is None else str(x).strip()
 
 
 def default_df(columns, rows=1):
-    """Create a DataFrame with given columns and optional empty rows."""
+    """Create an empty DataFrame with specified columns."""
     return pd.DataFrame([{c: None for c in columns} for _ in range(rows)])
 
 
 def normalize_numeric(df):
-    """Convert numeric-looking columns to floats and others to strings."""
+    """Normalize numeric vs string columns for consistent deduping."""
     for col in df.columns:
         if any(
             k in col.lower()
@@ -57,17 +56,27 @@ def normalize_numeric(df):
 
 
 def add_meta(df, core):
-    """Attach the core metadata fields to each table."""
+    """Attach core metadata columns to each exported table."""
     meta = pd.DataFrame([core] * max(len(df.index), 1))
     return pd.concat([meta.reset_index(drop=True), df.reset_index(drop=True)], axis=1)
 
 
+def smart_dedupe(df, key_subset=None):
+    """Robust deduplication with normalization and subset logic."""
+    for c in df.columns:
+        df[c] = df[c].apply(lambda x: str(x).strip().lower() if isinstance(x, str) else x)
+    df = df.apply(lambda col: col.round(4) if pd.api.types.is_numeric_dtype(col) else col)
+    if key_subset:
+        return df.drop_duplicates(subset=key_subset, keep="first", ignore_index=True)
+    return df.drop_duplicates(keep="first", ignore_index=True)
+
+
 # ==========================================================
-# ⚙️ Streamlit UI
+# ⚙️ STREAMLIT UI
 # ==========================================================
 st.title("🛢️ Primo Daily Drilling Report — Data Entry & Export")
 
-# ---------------- Header Section ----------------
+# ---------------- Header ----------------
 st.subheader("Header Information")
 c1, c2, c3, c4 = st.columns(4)
 report_number = c1.text_input("Report #", value="1")
@@ -99,7 +108,7 @@ drlg_hrs_today = c5.number_input("Drlg Hrs Today", value=3.0)
 current_run_ftg = c6.number_input("Current Run Ftg", value=0.0)
 circ_hrs_today = c7.number_input("Circ Hrs Today", value=0.0)
 
-# ---------------- Data Tables ----------------
+# ---------------- Tables ----------------
 st.markdown("---")
 colA, colB = st.columns(2)
 
@@ -147,7 +156,7 @@ with colB:
     st.subheader("Survey Info (optional)")
     survey_df = st.data_editor(default_df(["depth_ft", "inc_deg", "azi_deg"], rows=3), key="survey")
 
-# ---------------- Bit, Casing, and Others ----------------
+# ---------------- Bit, Casing, Others ----------------
 st.markdown("---")
 st.subheader("Bit Data")
 bit_df = st.data_editor(
@@ -199,7 +208,7 @@ with colG:
 
 
 # ==========================================================
-# 🚀 Export & Download
+# 🚀 EXPORT & DOWNLOAD
 # ==========================================================
 if st.button("📦 Normalize, Dedupe & Export"):
     core = dict(
@@ -248,16 +257,20 @@ if st.button("📦 Normalize, Dedupe & Export"):
         "personnel": add_meta(personnel_df, core),
     }
 
-    # ✅ Deduplicate each table before exporting
+    # ✅ Smart deduping for all tables (key-based for pump & bha)
     dedupe_report = []
     for name, df in outputs.items():
         before = len(df)
-        df = df.drop_duplicates(ignore_index=True)
+        if name == "pump":
+            df = smart_dedupe(df, key_subset=["report_number", "well_name", "pump_no"])
+        elif name == "bha":
+            df = smart_dedupe(df, key_subset=["report_number", "well_name", "item", "od_in"])
+        else:
+            df = smart_dedupe(df)
         after = len(df)
         outputs[name] = df
-        removed = before - after
-        if removed > 0:
-            dedupe_report.append(f"{name}.csv → removed {removed} duplicate rows")
+        if before != after:
+            dedupe_report.append(f"{name}.csv → removed {before - after} duplicate rows")
 
     # --- Fill Excel Template ---
     try:
@@ -286,7 +299,7 @@ if st.button("📦 Normalize, Dedupe & Export"):
         st.warning(f"⚠️ Could not fill Excel template: {e}")
         filled_xlsx = None
 
-    # --- Build ZIP with deduped CSVs ---
+    # --- ZIP export ---
     zip_buf = io.BytesIO()
     with zipfile.ZipFile(zip_buf, "w") as zf:
         for name, df in outputs.items():
@@ -304,4 +317,4 @@ if st.button("📦 Normalize, Dedupe & Export"):
 
     if dedupe_report:
         st.info("🧹 Duplicates Removed:\n" + "\n".join(dedupe_report))
-    st.success("✅ Export complete! Files are ready for Supabase upload.")
+    st.success("✅ Export complete! All files cleaned and deduped.")
