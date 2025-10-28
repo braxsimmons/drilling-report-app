@@ -12,14 +12,14 @@ from openpyxl import load_workbook
 # 🔧 CONFIGURATION
 # ==========================================================
 st.set_page_config(page_title="🛢️ Primo Drilling Report", layout="wide")
-TEMPLATE_PATH = "Daily Report Template.xlsx"  # Must exist in app directory
+TEMPLATE_PATH = "Daily Report Template.xlsx"  # must exist in the app directory
 
 
 # ==========================================================
 # 🔹 Utility Functions
 # ==========================================================
 def to_float(x):
-    """Convert text or numbers safely to float."""
+    """Safely convert text or numeric input to float."""
     if x is None or (isinstance(x, str) and x.strip() == ""):
         return None
     if isinstance(x, (int, float)):
@@ -30,17 +30,17 @@ def to_float(x):
 
 
 def to_str(x):
-    """Convert any value to trimmed string."""
+    """Convert any value to a trimmed string."""
     return "" if x is None else str(x).strip()
 
 
 def default_df(columns, rows=1):
-    """Create an empty DataFrame with specified columns."""
+    """Create an empty DataFrame with specified columns and number of rows."""
     return pd.DataFrame([{c: None for c in columns} for _ in range(rows)])
 
 
 def normalize_numeric(df):
-    """Normalize numeric vs string columns for consistent deduping."""
+    """Normalize numeric vs text columns for consistent deduping."""
     for col in df.columns:
         if any(
             k in col.lower()
@@ -56,19 +56,35 @@ def normalize_numeric(df):
 
 
 def add_meta(df, core):
-    """Attach core metadata columns to each exported table."""
+    """Attach the core metadata columns to each exported table."""
     meta = pd.DataFrame([core] * max(len(df.index), 1))
     return pd.concat([meta.reset_index(drop=True), df.reset_index(drop=True)], axis=1)
 
 
-def smart_dedupe(df, key_subset=None):
-    """Robust deduplication with normalization and subset logic."""
-    for c in df.columns:
-        df[c] = df[c].apply(lambda x: str(x).strip().lower() if isinstance(x, str) else x)
-    df = df.apply(lambda col: col.round(4) if pd.api.types.is_numeric_dtype(col) else col)
+def clean_and_dedupe(df: pd.DataFrame, key_subset=None):
+    """Fully clean: remove blanks, normalize types, and dedupe deterministically."""
+    # Drop rows that are completely empty or NaN
+    df = df.dropna(how="all").copy()
+
+    # Normalize strings
+    for col in df.columns:
+        df[col] = df[col].apply(lambda x: str(x).strip().lower() if isinstance(x, str) else x)
+
+    # Convert key columns to string for robust comparison (1 vs 1.0)
     if key_subset:
-        return df.drop_duplicates(subset=key_subset, keep="first", ignore_index=True)
-    return df.drop_duplicates(keep="first", ignore_index=True)
+        for k in key_subset:
+            if k in df.columns:
+                df[k] = df[k].astype(str).str.strip().str.lower()
+
+    # Drop duplicates
+    if key_subset:
+        df = df.drop_duplicates(subset=key_subset, keep="first", ignore_index=True)
+    else:
+        df = df.drop_duplicates(keep="first", ignore_index=True)
+
+    # Drop any remaining all-blank rows
+    df = df.dropna(how="all").reset_index(drop=True)
+    return df
 
 
 # ==========================================================
@@ -115,9 +131,7 @@ colA, colB = st.columns(2)
 with colA:
     st.subheader("Pump Data")
     pump_df = st.data_editor(
-        default_df(
-            ["pump_no", "bbls_per_stroke", "gals_per_stroke", "vol_gpm", "spm"], rows=2
-        ).assign(pump_no=[1, 2]),
+        default_df(["pump_no", "bbls_per_stroke", "gals_per_stroke", "vol_gpm", "spm"], rows=2).assign(pump_no=[1, 2]),
         num_rows="dynamic",
         key="pump",
     )
@@ -211,6 +225,7 @@ with colG:
 # 🚀 EXPORT & DOWNLOAD
 # ==========================================================
 if st.button("📦 Normalize, Dedupe & Export"):
+    # Core metadata
     core = dict(
         report_number=to_str(report_number),
         date=str(report_date),
@@ -232,6 +247,7 @@ if st.button("📦 Normalize, Dedupe & Export"):
         created_at=str(datetime.utcnow()),
     )
 
+    # Normalize numeric/text columns
     dfs = [
         pump_df, mud_df, params_df, motor_df, bha_df, survey_df, bit_df,
         casing_df, drillpipe_df, rental_df, time_df, fuel_df, chemicals_df, personnel_df
@@ -239,6 +255,7 @@ if st.button("📦 Normalize, Dedupe & Export"):
     for df in dfs:
         normalize_numeric(df)
 
+    # Build export dictionary
     outputs = {
         "core": pd.DataFrame([core]),
         "pump": add_meta(pump_df, core),
@@ -257,16 +274,16 @@ if st.button("📦 Normalize, Dedupe & Export"):
         "personnel": add_meta(personnel_df, core),
     }
 
-    # ✅ Smart deduping for all tables (key-based for pump & bha)
+    # ✅ Clean and dedupe all tables
     dedupe_report = []
     for name, df in outputs.items():
         before = len(df)
         if name == "pump":
-            df = smart_dedupe(df, key_subset=["report_number", "well_name", "pump_no"])
+            df = clean_and_dedupe(df, ["report_number", "well_name", "pump_no"])
         elif name == "bha":
-            df = smart_dedupe(df, key_subset=["report_number", "well_name", "item", "od_in"])
+            df = clean_and_dedupe(df, ["report_number", "well_name", "item", "od_in"])
         else:
-            df = smart_dedupe(df)
+            df = clean_and_dedupe(df)
         after = len(df)
         outputs[name] = df
         if before != after:
@@ -299,7 +316,7 @@ if st.button("📦 Normalize, Dedupe & Export"):
         st.warning(f"⚠️ Could not fill Excel template: {e}")
         filled_xlsx = None
 
-    # --- ZIP export ---
+    # --- Build ZIP with all CSVs ---
     zip_buf = io.BytesIO()
     with zipfile.ZipFile(zip_buf, "w") as zf:
         for name, df in outputs.items():
@@ -317,4 +334,4 @@ if st.button("📦 Normalize, Dedupe & Export"):
 
     if dedupe_report:
         st.info("🧹 Duplicates Removed:\n" + "\n".join(dedupe_report))
-    st.success("✅ Export complete! All files cleaned and deduped.")
+    st.success("✅ Export complete! All files cleaned, deduped, and ready for upload.")
